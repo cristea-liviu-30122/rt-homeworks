@@ -1,6 +1,7 @@
 package ssatr.device;
 
 import java.util.concurrent.BlockingQueue;
+import java.util.Locale;
 
 /**
  * TASK APERIODIC: execută comenzile primite de la business service.
@@ -37,14 +38,63 @@ public class AperiodicCommandTask implements Runnable {
 
     @Override
     public void run() {
-        // TODO 3: implementați taskul aperiodic:
-        //   - preluați comenzile din coadă: commands.take()
-        //   - separați numele comenzii de parametru: command.split(" ")
-        //   - executați comanda (periodic.setPeriodMs(...), sensor.reset() etc.)
-        //   - publicați confirmarea pe Config.statusTopic(deviceId)
-        //   - o comandă necunoscută sau un parametru invalid nu trebuie să
-        //     oprească taskul: publicați "ERROR <motiv>"
-        //
-        // Vezi exemplul exemple/01-taskuri/.../AperiodicTaskExample.java
+        while (true) {
+            String command;
+            try {
+                command = commands.take();         // eliberarea unui job aperiodic
+            } catch (InterruptedException e) {
+                return;
+            }
+
+            String result;
+            try {
+                result = execute(command.trim());
+            } catch (NumberFormatException e) {
+                result = "ERROR parametru invalid in: " + command;
+            } catch (Exception e) {
+                // nicio comandă greșită nu oprește taskul
+                result = "ERROR " + e.getMessage();
+            }
+
+            String msg = deviceId + ";" + System.currentTimeMillis() + ";" + result;
+            mqtt.publish(Config.statusTopic(deviceId), msg);
+            System.out.println("[aperiodic] " + msg);
+        }
+    }
+
+    private String execute(String command) {
+        String[] parts = command.split("\\s+");
+        String name = parts[0].toUpperCase();
+
+        switch (name) {
+            case "SET_INTERVAL": {
+                long ms = Long.parseLong(requireParam(parts));
+                if (ms <= 0) {
+                    throw new IllegalArgumentException("intervalul trebuie sa fie > 0");
+                }
+                periodic.setPeriodMs(ms);
+                return "OK SET_INTERVAL " + ms;
+            }
+            case "SET_THRESHOLD": {
+                double value = Double.parseDouble(requireParam(parts));
+                periodic.setThreshold(value);
+                return String.format(Locale.US, "OK SET_THRESHOLD %.2f", value);
+            }
+            case "RESET":
+                sensor.reset();
+                return "OK RESET";
+            case "STATUS":
+                return String.format(Locale.US, "OK STATUS interval=%d prag=%.2f",
+                        periodic.getPeriodMs(), periodic.getThreshold());
+            default:
+                throw new IllegalArgumentException("comanda necunoscuta: " + command);
+        }
+    }
+
+    private static String requireParam(String[] parts) {
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("lipseste parametrul pentru " + parts[0]);
+        }
+        return parts[1];
     }
 }
