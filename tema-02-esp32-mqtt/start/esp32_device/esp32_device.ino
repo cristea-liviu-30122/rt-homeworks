@@ -117,24 +117,74 @@ void sporadic_task(void* param) {
 }
 
 // TODO 3: TASK APERIODIC, execută comenzile primite de la business service.
-//   Comenzile ajung în command_received() (mai jos), care le pune în coada de
-//   comenzi; fiecare comandă eliberează un job al taskului:
-//     SET_INTERVAL <ms>       schimbă perioada T a taskului periodic
-//     SET_THRESHOLD <valoare> schimbă pragul de alarmă
-//     RESET                   readuce perioada și pragul la valorile inițiale
-//     STATUS                  raportează perioada și pragul curente
-//   După fiecare comandă publică o confirmare:
-//     mqtt_publish("status", "deviceId;timestamp;OK SET_INTERVAL 1000")
-//   O comandă necunoscută sau un parametru invalid nu oprește taskul: se
-//   publică "ERROR <motiv>".
+// Execută o comandă și scrie rezultatul în result ("OK ..." sau "ERROR ...").
+static void execute_command(const char* text, char* result, size_t size) {
+    char name[24] = "";
+    char arg[32] = "";
+    int n = sscanf(text, "%23s %31s", name, arg);
+
+    if (n < 1) {
+        snprintf(result, size, "ERROR comanda goala");
+    } else if (strcasecmp(name, "SET_INTERVAL") == 0) {
+        char* end;
+        long ms = strtol(arg, &end, 10);
+        if (n < 2) {
+            snprintf(result, size, "ERROR lipseste parametrul pentru SET_INTERVAL");
+        } else if (*end != '\0' || ms <= 0) {
+            snprintf(result, size, "ERROR parametru invalid: %s", arg);
+        } else {
+            periodMs = (uint32_t)ms;
+            snprintf(result, size, "OK SET_INTERVAL %ld", ms);
+        }
+    } else if (strcasecmp(name, "SET_THRESHOLD") == 0) {
+        char* end;
+        float value = strtof(arg, &end);
+        if (n < 2) {
+            snprintf(result, size, "ERROR lipseste parametrul pentru SET_THRESHOLD");
+        } else if (*end != '\0') {
+            snprintf(result, size, "ERROR parametru invalid: %s", arg);
+        } else {
+            threshold = value;
+            snprintf(result, size, "OK SET_THRESHOLD %.2f", value);
+        }
+    } else if (strcasecmp(name, "RESET") == 0) {
+        periodMs = PERIOD_MS_INITIAL;
+        threshold = THRESHOLD_INITIAL;
+        snprintf(result, size, "OK RESET");
+    } else if (strcasecmp(name, "STATUS") == 0) {
+        snprintf(result, size, "OK STATUS interval=%lu prag=%.2f",
+                 (unsigned long)periodMs, threshold);
+    } else {
+        snprintf(result, size, "ERROR comanda necunoscuta: %s", name);
+    }
+}
+
+void aperiodic_task(void* param) {
+    Command cmd;
+    char result[80];
+    char msg[128];
+
+    for (;;) {
+        xQueueReceive(commandQueue, &cmd, portMAX_DELAY);  // eliberarea unui job aperiodic
+
+        execute_command(cmd.text, result, sizeof(result));
+
+        snprintf(msg, sizeof(msg), "%s;%lld;%s", DEVICE_ID, (long long)epoch_ms(), result);
+        mqtt_publish("status", msg);
+        Serial.printf("[aperiodic] %s\n", msg);
+    }
+}
 
 // Apelată de clientul MQTT pentru fiecare comandă primită (vezi connection.h).
 void command_received(const char* text) {
     Serial.printf("[mqtt] comandă primită: %s\n", text);
     // TODO 3: puneți comanda în coada de comenzi, fără să vă blocați
-    //   (timeout 0). text este valid doar în timpul acestui apel: elementul
-    //   cozii trebuie să conțină textul însuși (de exemplu un struct cu
-    //   char text[COMMAND_MAX_LEN]), nu un pointer.
+    Command cmd;
+    strncpy(cmd.text, text, sizeof(cmd.text) - 1);
+    cmd.text[sizeof(cmd.text) - 1] = '\0';
+    if (xQueueSend(commandQueue, &cmd, 0) != pdTRUE) {
+        Serial.println("[mqtt] coada de comenzi plina, comanda pierduta");
+    }
 }
 
 void setup() {
@@ -161,7 +211,7 @@ void setup() {
     // TODO 0 (b): porniți cele trei taskuri (xTaskCreate). După mqtt_start(),
     xTaskCreate(periodic_task, "periodic", TASK_STACK, NULL, PRIO_PERIODIC, NULL);
     xTaskCreate(sporadic_task,  "sporadic",  TASK_STACK, NULL, PRIO_SPORADIC,  NULL);
-    // xTaskCreate(aperiodic_task, "aperiodic", TASK_STACK, NULL, PRIO_APERIODIC, NULL);
+    xTaskCreate(aperiodic_task, "aperiodic", TASK_STACK, NULL, PRIO_APERIODIC, NULL);
 }
 
 void loop() {
