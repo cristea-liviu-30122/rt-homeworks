@@ -27,12 +27,49 @@ public class MessageProcessor implements Runnable {
 
     @Override
     public void run() {
-        // TODO 4: într-o buclă:
-        //   - preluați un mesaj: inbox.take()
-        //   - salvați mesajul în fișierul CSV: storage.append(kind, mesaj)
-        //     (CsvStorage este gata implementată)
-        //   - actualizați dashboard-ul, în funcție de kind
-        //   - alarmele și confirmările se afișează imediat în consolă
-        //   - un mesaj greșit (format invalid) nu trebuie să oprească thread-ul
+        while (true) {
+            String message;
+            try {
+                message = inbox.take();
+            } catch (InterruptedException e) {
+                return;
+            }
+
+            try {
+                storage.append(kind, message);   // salvat exact cum a sosit
+                process(message);
+            } catch (Exception e) {
+                // un mesaj invalid nu oprește thread-ul
+                System.out.println("[" + kind + "] mesaj invalid ignorat: " + message + " (" + e.getMessage() + ")");
+            }
+        }
+    }
+
+    private void process(String message) {
+        String[] f = message.split(";");
+        if (f.length < 3) {
+            throw new IllegalArgumentException("prea putine campuri");
+        }
+        String deviceId = f[0];
+        long timestamp = Long.parseLong(f[1]);
+
+        switch (kind) {
+            case "telemetry":
+                dashboard.updateTelemetry(deviceId, timestamp, Double.parseDouble(f[2]));
+                break;
+            case "alarm":
+                if (f.length < 4) {
+                    throw new IllegalArgumentException("alarma fara prag");
+                }
+                dashboard.updateAlarm(deviceId, timestamp);
+                System.out.println(">>> ALARMA " + deviceId + ": temperatura " + f[2] + " > prag " + f[3]);
+                break;
+            case "status":
+                dashboard.updateStatus(deviceId, timestamp);
+                System.out.println(">>> " + deviceId + ": " + f[2]);
+                break;
+            default:
+                throw new IllegalArgumentException("tip necunoscut " + kind);
+        }
     }
 }
