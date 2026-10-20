@@ -89,11 +89,32 @@ void periodic_task(void* param) {
 }
 
 // TODO 2: TASK SPORADIC, tratează alarmele de temperatură.
-//   - așteaptă un eveniment din coada de alarme
-//   - dacă de la ultima alarmă publicată au trecut mai puțin de
-//     MIN_INTERARRIVAL_MS, respinge evenimentul (afișați un mesaj pe Serial)
-//   - altfel publică: mqtt_publish("alarm", "deviceId;timestamp;temperatura;prag")
-//   Pentru intervale folosiți un timp monoton, millis(), nu epoch_ms().
+void sporadic_task(void* param) {
+    bool released = false;     // a existat deja o alarmă publicată?
+    uint32_t lastRelease = 0;  // millis() la ultima alarmă publicată
+    AlarmEvent ev;
+    char msg[96];
+
+    for (;;) {
+        xQueueReceive(alarmQueue, &ev, portMAX_DELAY);  // sosirea unui eveniment
+
+        uint32_t now = millis();
+        uint32_t since = now - lastRelease;  // fără semn: corect și la depășirea millis()
+
+        if (released && since < MIN_INTERARRIVAL_MS) {
+            Serial.printf("[sporadic] RESPINS %.2f (au trecut %lu ms < %lu ms)\n",
+                          ev.temperature, (unsigned long)since, (unsigned long)MIN_INTERARRIVAL_MS);
+            continue;
+        }
+
+        released = true;
+        lastRelease = now;
+        snprintf(msg, sizeof(msg), "%s;%lld;%.2f;%.2f",
+                 DEVICE_ID, (long long)epoch_ms(), ev.temperature, ev.threshold);
+        mqtt_publish("alarm", msg);
+        Serial.printf("[sporadic] ALARMA %s\n", msg);
+    }
+}
 
 // TODO 3: TASK APERIODIC, execută comenzile primite de la business service.
 //   Comenzile ajung în command_received() (mai jos), care le pune în coada de
@@ -139,7 +160,7 @@ void setup() {
 
     // TODO 0 (b): porniți cele trei taskuri (xTaskCreate). După mqtt_start(),
     xTaskCreate(periodic_task, "periodic", TASK_STACK, NULL, PRIO_PERIODIC, NULL);
-    // xTaskCreate(sporadic_task,  "sporadic",  TASK_STACK, NULL, PRIO_SPORADIC,  NULL);
+    xTaskCreate(sporadic_task,  "sporadic",  TASK_STACK, NULL, PRIO_SPORADIC,  NULL);
     // xTaskCreate(aperiodic_task, "aperiodic", TASK_STACK, NULL, PRIO_APERIODIC, NULL);
 }
 
