@@ -33,18 +33,60 @@ float read_temperature(void) {
     return temperatureRead();
 }
 
+
+// Evenimentul de alarmă: temperatura și pragul depășit, capturate la detecție.
+// Se pune în coadă prin valoare (xQueueSend copiază struct-ul).
+typedef struct {
+    float temperature;
+    float threshold;
+} AlarmEvent;
+
+// O comandă primită: textul însuși, nu un pointer.
+typedef struct {
+    char text[COMMAND_MAX_LEN];
+} Command;
+
+static QueueHandle_t alarmQueue = NULL;
+static QueueHandle_t commandQueue = NULL;
+
+// citite de taskul periodic, modificate de taskul aperiodic
+static volatile uint32_t periodMs = PERIOD_MS_INITIAL;
+static volatile float threshold = THRESHOLD_INITIAL;
+
+// Prioritățile, rate monotonic: perioada mai mică -> prioritate mai mare
+static const UBaseType_t PRIO_PERIODIC  = 5;   // T = 2000 ms
+static const UBaseType_t PRIO_SPORADIC  = 4;   // T_min = 5000 ms
+static const UBaseType_t PRIO_APERIODIC = 3;   // fără T, termen soft
+static const uint32_t TASK_STACK = 4096;       // octeți; snprintf cu %f cere stivă
+
+
 // TODO 1: TASK PERIODIC, cu perioada T (inițial PERIOD_MS_INITIAL).
-//   Fiecare job:
-//   - citește temperatura: read_temperature()
-//   - publică telemetria: mqtt_publish("telemetry", "deviceId;timestamp;temperatura")
-//     (timestamp = epoch_ms(), tipărit cu %lld; temperatura cu "%.2f")
-//   - dacă temperatura depășește pragul (inițial THRESHOLD_INITIAL), pune
-//     un eveniment în coada de alarme, fără să se blocheze (timeout 0).
-//     Taskul periodic NU tratează alarma: o tratează taskul sporadic.
-//   Eliberările respectă grila r_k = r_0 + kT: folosiți așteptare absolută
-//   (xTaskDelayUntil), nu relativă (delay, vTaskDelay), ca să nu apară derivă.
-//   Perioada și pragul se schimbă prin comenzi (taskul aperiodic), deci sunt
-//   variabile globale volatile, citite la fiecare job.
+void periodic_task(void* param) {
+    // r_0: prima eliberare este acum
+    TickType_t lastWake = xTaskGetTickCount();
+    char msg[96];
+
+    for (;;) {
+        // --- jobul k ---
+        float t = read_temperature();
+        float th = threshold;   // o singură citire per job
+
+        // întâi alarma, fără blocare (timeout 0)
+        if (t > th) {
+            AlarmEvent ev = {t, th};
+            if (xQueueSend(alarmQueue, &ev, 0) != pdTRUE) {
+                Serial.println("[periodic] coada de alarme plina, eveniment pierdut");
+            }
+        }
+
+        snprintf(msg, sizeof(msg), "%s;%lld;%.2f", DEVICE_ID, (long long)epoch_ms(), t);
+        mqtt_publish("telemetry", msg);
+        Serial.printf("[periodic] %s\n", msg);
+
+        // --- așteptare absolută: r_{k+1} = r_k + T ---
+        xTaskDelayUntil(&lastWake, pdMS_TO_TICKS(periodMs));
+    }
+}
 
 // TODO 2: TASK SPORADIC, tratează alarmele de temperatură.
 //   - așteaptă un eveniment din coada de alarme
@@ -90,15 +132,15 @@ void setup() {
     time_sync();
 
     // TODO 0 (a): creați cele două cozi (xQueueCreate): coada de alarme și
-    //   coada de comenzi. Înainte de mqtt_start(): de acolo încolo pot sosi
-    //   comenzi, iar command_received() le pune în coada de comenzi.
+    alarmQueue = xQueueCreate(5, sizeof(AlarmEvent));
+    commandQueue = xQueueCreate(10, sizeof(Command));
 
     mqtt_start();
 
     // TODO 0 (b): porniți cele trei taskuri (xTaskCreate). După mqtt_start(),
-    //   ca primele mesaje publicate să nu se piardă. Alegeți prioritățile
-    //   între 2 și 19: peste loopTask (1), sub taskurile sistemului pentru
-    //   evenimente și Wi-Fi (20, 23). Stiva, în octeți: cel puțin 4096.
+    xTaskCreate(periodic_task, "periodic", TASK_STACK, NULL, PRIO_PERIODIC, NULL);
+    // xTaskCreate(sporadic_task,  "sporadic",  TASK_STACK, NULL, PRIO_SPORADIC,  NULL);
+    // xTaskCreate(aperiodic_task, "aperiodic", TASK_STACK, NULL, PRIO_APERIODIC, NULL);
 }
 
 void loop() {
