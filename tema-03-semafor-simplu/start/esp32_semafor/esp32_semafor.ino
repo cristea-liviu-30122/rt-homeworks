@@ -51,18 +51,46 @@ struct ButtonPress {
 };
 static QueueHandle_t button_queue = NULL;
 
-// TODO 1: TASK PERIODIC DE CONTROL, cu perioada CONTROL_PERIOD_MS.
-//   La fiecare job, cu mutexul luat, decide dacă faza curentă s-a terminat și
-//   trece în faza următoare, după tabelul din README.md:
-//     CAR_GREEN  -> CAR_YELLOW  după CAR_GREEN_MIN_MS, doar dacă există o cerere
-//     CAR_YELLOW -> ALL_RED     după CAR_YELLOW_MS
-//     ALL_RED    -> PED_GREEN   după ALL_RED_MS; aici se șterge cererea pietonului
-//     PED_GREEN  -> CAR_GREEN   după PED_GREEN_MS
-//   La fiecare schimbare de fază notați momentul intrării în faza nouă.
-//   Taskul nu publică nimic: doar actualizează starea. După ce eliberează
-//   mutexul, afișează pe Serial faza nouă, dacă s-a schimbat.
-//   Eliberările respectă grila r_k = r_0 + kT: așteptare absolută (xTaskDelayUntil).
-//   Durata unei faze se măsoară cu un timp monoton (millis()), nu cu epoch_ms().
+// TODO 1: TASK PERIODIC DE CONTROL, cu perioada T = CONTROL_PERIOD_MS.
+void control_task(void* arg) {
+    TickType_t last_wake = xTaskGetTickCount();
+    for (;;) {
+        bool changed = false;
+        Phase next;
+        uint32_t now;
+
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        now = millis();
+        uint32_t elapsed = now - state.phase_start_ms;  // cât a durat faza curentă
+        next = state.phase;
+        switch (state.phase) {
+            case CAR_GREEN:
+                if (elapsed >= CAR_GREEN_MIN_MS && state.ped_request) next = CAR_YELLOW;
+                break;
+            case CAR_YELLOW:
+                if (elapsed >= CAR_YELLOW_MS) next = ALL_RED;
+                break;
+            case ALL_RED:
+                if (elapsed >= ALL_RED_MS) next = PED_GREEN;
+                break;
+            case PED_GREEN:
+                if (elapsed >= PED_GREEN_MS) next = CAR_GREEN;
+                break;
+        }
+        if (next != state.phase) {
+            state.phase = next;
+            state.phase_start_ms = now;                       // momentul intrării în faza nouă
+            if (next == PED_GREEN) state.ped_request = false; // pietonul primește ce a cerut
+            changed = true;
+        }
+        xSemaphoreGive(state_mutex);
+
+        // Serial doar după ce am eliberat mutexul
+        if (changed) Serial.printf("[control] %lu ms: faza %s\n", (unsigned long)now, PHASE_NAMES[next]);
+
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
+    }
+}
 
 // TODO 2: TASK PERIODIC DE IEȘIRE, cu perioada T = OUTPUT_PERIOD_MS.
 void output_task(void* arg) {
@@ -165,6 +193,7 @@ void setup() {
     // TODO 0 (b): porniți cele trei taskuri (xTaskCreate)
     // taskurile (stiva în octeți), apoi întreruperea
     // priorități: sporadic 5 > control 4 (T = 100 ms) > ieșire 3 (T = 500 ms), Rate Monotonic
+    xTaskCreate(control_task, "control", 4096, NULL, 4, NULL);
     xTaskCreate(output_task, "output", 4096, NULL, 3, NULL);
 }
 
