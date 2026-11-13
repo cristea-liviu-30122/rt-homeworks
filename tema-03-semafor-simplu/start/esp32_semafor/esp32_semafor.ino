@@ -132,34 +132,57 @@ void output_task(void* arg) {
 }
 
 // TODO 3: TASK SPORADIC, tratează apăsările butonului pentru pietoni.
-//   Apăsările vin din două surse, în aceeași coadă (coada butonului):
-//   - butonul BOOT de pe placă, printr-o rutină de întrerupere (ISR, mai jos)
-//   - butonul virtual din dashboard: comanda "BUTTON", pusă în coadă de
-//     command_received()
-//   Taskul:
-//   - așteaptă o apăsare din coada butonului
-//   - dacă de la ultima apăsare acceptată au trecut mai puțin de
-//     MIN_INTERARRIVAL_MS, o respinge (mesaj pe Serial). Așa se filtrează și
-//     contactele imperfecte ale butonului (bounce), care produc mai multe
-//     întreruperi la o singură apăsare.
-//   - altfel înregistrează cererea pietonului în starea semaforului (cu mutexul)
-//     și afișează pe Serial că a acceptat-o
-//   Momentul sosirii se ia când apăsarea intră în coadă (în ISR sau în
-//   command_received()), nu când o preia taskul, și se pune în elementul cozii.
+// cu interval minim între sosiri (MIN_INTERARRIVAL_MS)
+void button_task(void* arg) {
+    ButtonPress p;
+    bool has_last = false;
+    uint32_t last_accepted_ms = 0;
+    for (;;) {
+        // blocat până sosește o apăsare (BOOT sau dashboard)
+        if (xQueueReceive(button_queue, &p, portMAX_DELAY) != pdTRUE) continue;
+        const char* src = (p.source == SRC_BOOT) ? "BOOT" : "dashboard";
 
-// TODO 3: RUTINA DE ÎNTRERUPERE a butonului BOOT, înregistrată în setup() cu
-//   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, FALLING).
-//   Scurtă: pune o apăsare în coada butonului cu xQueueSendFromISR() și atât.
-//   Fără Serial, fără mqtt_publish(), fără mutex. Se declară cu IRAM_ATTR:
-//
-//   void IRAM_ATTR button_isr(void) { ... }
+        // prea devreme față de ultima acceptată -> respinsă (filtrează și bounce-ul)
+        if (has_last && (p.t_ms - last_accepted_ms) < MIN_INTERARRIVAL_MS) {
+            Serial.printf("[buton] respinsă (%s): %lu ms după ultima acceptată\n",
+                          src, (unsigned long)(p.t_ms - last_accepted_ms));
+            continue;
+        }
+        has_last = true;
+        last_accepted_ms = p.t_ms;
+
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        state.ped_request = true;
+        xSemaphoreGive(state_mutex);
+
+        Serial.printf("[buton] acceptată (%s) la %lu ms: cerere înregistrată\n",
+                      src, (unsigned long)p.t_ms);
+    }
+}
+
+// TODO 3: RUTINA DE ÎNTRERUPERE a butonului BOOT, înregistrată în setup() cu attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, FALLING).
+//   ISR butonul BOOT: doar pune apăsarea în coadă
+void IRAM_ATTR button_isr(void) {
+    ButtonPress p;
+    p.t_ms = pdTICKS_TO_MS(xTaskGetTickCountFromISR());  // momentul sosirii, luat aici
+    p.source = SRC_BOOT;
+    BaseType_t woken = pdFALSE;
+    xQueueSendFromISR(button_queue, &p, &woken);
+    portYIELD_FROM_ISR(woken);
+}
 
 // Apelată de clientul MQTT pentru fiecare comandă primită (vezi connection.h).
 void command_received(const char* text) {
     Serial.printf("[mqtt] comandă primită: %s\n", text);
-    // TODO 3: "BUTTON" merge în coada butonului (o apăsare, la fel ca cea din
-    //   ISR), fără să vă blocați (timeout 0). Celelalte comenzi se ignoră:
-    //   în această temă placa nu are alte comenzi.
+    // TODO 3: "BUTTON" merge în coada butonului
+    if (strcmp(text, "BUTTON") == 0) {
+        ButtonPress p;
+        p.t_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+        p.source = SRC_DASHBOARD;
+        if (xQueueSend(button_queue, &p, 0) != pdTRUE) {   // timeout 0, nu se blochează
+            Serial.println("[mqtt] coada butonului plină, apăsare pierdută");
+        }
+    }
 }
 
 void setup() {
@@ -195,6 +218,9 @@ void setup() {
     // priorități: sporadic 5 > control 4 (T = 100 ms) > ieșire 3 (T = 500 ms), Rate Monotonic
     xTaskCreate(control_task, "control", 4096, NULL, 4, NULL);
     xTaskCreate(output_task, "output", 4096, NULL, 3, NULL);
+
+    xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, FALLING);
 }
 
 void loop() {
