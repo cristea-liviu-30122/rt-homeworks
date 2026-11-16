@@ -1,0 +1,3 @@
+# secrete: nu urcă pe GitHub (target/ e deja ignorat în .gitignore-ul din rădăcină)
+aplicatie-java/secrets.properties
+esp32_tracker/secrets.h
