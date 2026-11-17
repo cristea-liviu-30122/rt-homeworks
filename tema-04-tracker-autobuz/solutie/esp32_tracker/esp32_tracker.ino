@@ -126,6 +126,40 @@ void logic_task(void* arg) {
 }
 
 // === PASUL 5: taskul LED (aici) ===
+// ---------------------------------------------------------------------------
+// Task LED (periodic, T = LED_PERIOD_MS): generează tiparul modului curent.
+// ---------------------------------------------------------------------------
+
+// true dacă LED-ul trebuie aprins la t ms după intrarea în mod
+static bool led_on(LedMode mode, uint32_t t) {
+    switch (mode) {
+        case LED_SLOW:    return (t % 2000) < 100;                 // puls 100 ms la 2 s
+        case LED_MEDIUM:  return (t % 1000) < 500;                 // 1 Hz
+        case LED_FAST:    return (t % 250) < 125;                  // 4 Hz
+        case LED_AT_STOP: return true;                             // continuu
+        case LED_STALE: {                                          // două pulsuri la 3 s
+            uint32_t p = t % 3000;
+            return p < 100 || (p >= 250 && p < 350);
+        }
+        case LED_ACK:     return t < 900 && (t % 300) < 150;       // 3 clipiri, apoi stins
+        default:          return false;                            // IDLE
+    }
+}
+
+void led_task(void* arg) {
+    TickType_t last_wake = xTaskGetTickCount();
+    for (;;) {
+        // copia stării, cu mutexul ținut cât mai puțin
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        TrackerState s = state;
+        xSemaphoreGive(state_mutex);
+
+        bool on = led_on(s.mode, millis() - s.mode_start_ms);
+        digitalWrite(LED_PIN, on ? LOW : HIGH);  // LED-ul plăcii se aprinde pe LOW
+
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LED_PERIOD_MS));
+    }
+}
 
 // === PASUL 6: butonul BOOT (aici) ===
 
@@ -157,6 +191,8 @@ void setup() {
     // priorități: sporadic (buton) 5 > LED periodic (T = 50 ms) 4 > logică aperiodică 3
     // === PASUL 6: taskul butonului (aici) ===
     // === PASUL 5: taskul LED (aici) ===
+    xTaskCreate(led_task, "led", 2048, NULL, 4, NULL);
+
     xTaskCreate(logic_task, "logic", 4096, NULL, 3, NULL);
 
     // === PASUL 6: întreruperea butonului (aici) ===
