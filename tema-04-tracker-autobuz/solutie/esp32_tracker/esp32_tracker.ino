@@ -162,6 +162,50 @@ void led_task(void* arg) {
 }
 
 // === PASUL 6: butonul BOOT (aici) ===
+// ---------------------------------------------------------------------------
+// Butonul BOOT: ISR -> coada butonului -> task sporadic -> BOARDED
+// ---------------------------------------------------------------------------
+static QueueHandle_t button_queue = NULL;  // elementul: momentul apăsării (ms de la pornire)
+
+// ISR: doar pune momentul apăsării în coadă; restul se face în task
+void IRAM_ATTR button_isr(void) {
+    uint32_t t_ms = pdTICKS_TO_MS(xTaskGetTickCountFromISR());
+    BaseType_t woken = pdFALSE;
+    xQueueSendFromISR(button_queue, &t_ms, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+// Task sporadic: apăsările mai dese de MIN_INTERARRIVAL_MS sunt respinse
+// (filtrează și bounce-ul contactului).
+void button_task(void* arg) {
+    uint32_t t_ms;
+    bool has_last = false;
+    uint32_t last_accepted_ms = 0;
+    char msg[64];
+    for (;;) {
+        if (xQueueReceive(button_queue, &t_ms, portMAX_DELAY) != pdTRUE) continue;
+
+        if (has_last && (t_ms - last_accepted_ms) < MIN_INTERARRIVAL_MS) {
+            Serial.printf("[buton] respinsă: %lu ms după ultima acceptată\n",
+                          (unsigned long)(t_ms - last_accepted_ms));
+            continue;
+        }
+        has_last = true;
+        last_accepted_ms = t_ms;
+
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool tracking = state.tracking;
+        xSemaphoreGive(state_mutex);
+
+        if (!tracking) {
+            Serial.println("[buton] apăsare ignorată: nu urmăresc niciun autobuz");
+            continue;
+        }
+        snprintf(msg, sizeof(msg), "BOARDED;%s;%lld", DEVICE_ID, (long long)epoch_ms());
+        mqtt_publish("events", msg);
+        Serial.printf("[buton] am urcat: %s\n", msg);
+    }
+}
 
 void setup() {
     Serial.begin(115200);
@@ -185,17 +229,20 @@ void setup() {
     state_mutex = xSemaphoreCreateMutex();
     status_queue = xQueueCreate(10, sizeof(StatusText));
     // === PASUL 6: coada butonului (aici) ===
+    button_queue = xQueueCreate(10, sizeof(uint32_t));
 
     mqtt_start();
 
     // priorități: sporadic (buton) 5 > LED periodic (T = 50 ms) 4 > logică aperiodică 3
     // === PASUL 6: taskul butonului (aici) ===
+    xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
     // === PASUL 5: taskul LED (aici) ===
     xTaskCreate(led_task, "led", 2048, NULL, 4, NULL);
 
     xTaskCreate(logic_task, "logic", 4096, NULL, 3, NULL);
 
     // === PASUL 6: întreruperea butonului (aici) ===
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, FALLING);
 }
 
 void loop() {
